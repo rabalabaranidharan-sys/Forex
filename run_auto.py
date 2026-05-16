@@ -33,7 +33,7 @@ last_close_hour = -1        # prevent double-close
 
 def banner():
     print("""
-╔═══��══════════════════════════════════════════════════════╗
+╔══════════════════════════════════════════════════════════╗
 ║        ForexMind SUPERBOT Auto Runner                    ║
 ║   Cycle: 15 min  |  Trade cooldown: 15 min per pair     ║
 ║   Day-end close: 20:00 UTC (avoids swap)                ║
