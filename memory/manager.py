@@ -1,12 +1,20 @@
 """
 ForexMind — Memory Manager
 Persistent JSON decision log + trade history + reflections
+
+ENHANCEMENT 4: Auto-sync outcomes from MT5 closed deals
 """
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
 
 from config.settings import MEMORY_DIR, DECISION_LOG, TRADE_HISTORY
 
@@ -53,6 +61,7 @@ class MemoryManager:
             },
             "debate_rounds":    len(debate_transcript),
             "outcome":          "pending",
+            "pnl":              0,
             "reflection":       "",
         }
 
@@ -77,6 +86,77 @@ class MemoryManager:
                 d["closed_at"]  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 break
         self._save(DECISION_LOG, decisions)
+
+    # ── ENHANCEMENT 4: Auto-sync outcomes from MT5 ─────────────────────
+    def sync_outcomes_from_mt5(self, executor) -> int:
+        """
+        ENHANCEMENT 4: Automatically sync closed deal outcomes from MT5.
+        Matches closed deals (DEAL_ENTRY_OUT) with pending decisions.
+        Returns number of outcomes updated.
+        """
+        if not MT5_AVAILABLE or not executor.connected:
+            return 0
+        
+        try:
+            # Get all closed deals from MT5 with magic=234000
+            # MT5 returns deals from a specific date range
+            magic = 234000
+            deals = mt5.history_deals_get(
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                datetime.now(timezone.utc)
+            )
+            
+            if not deals:
+                return 0
+            
+            # Filter for our magic number and closed entries
+            fm_deals = [
+                d for d in deals
+                if d.magic == magic and d.entry == 1  # DEAL_ENTRY_OUT = 1
+            ]
+            
+            if not fm_deals:
+                return 0
+            
+            decisions = self._load(DECISION_LOG)
+            updated = 0
+            
+            for deal in fm_deals:
+                # Extract deal info
+                deal_ticket = deal.ticket
+                deal_symbol = deal.symbol
+                deal_profit = deal.profit
+                deal_time = datetime.fromtimestamp(deal.time)
+                
+                # Convert symbol back to pair format (EURUSD → EUR_USD)
+                if len(deal_symbol) == 6:
+                    pair_key = f"{deal_symbol[:3]}_{deal_symbol[3:]}"
+                else:
+                    pair_key = deal_symbol
+                
+                # Find matching pending decision by pair + time proximity
+                for d in decisions:
+                    if (d.get("pair") == pair_key and
+                        d.get("outcome") == "pending"):
+                        
+                        # Update with actual outcome
+                        outcome = "WIN" if deal_profit > 0 else "LOSS"
+                        d["outcome"] = outcome
+                        d["pnl"] = round(deal_profit, 2)
+                        d["closed_at"] = deal_time.strftime("%Y-%m-%d %H:%M:%S")
+                        updated += 1
+                        
+                        print(f"  [Memory] Synced {pair_key} deal: {outcome} | P&L: ${deal_profit:.2f}")
+                        break
+            
+            if updated > 0:
+                self._save(DECISION_LOG, decisions)
+            
+            return updated
+        
+        except Exception as e:
+            print(f"  [Memory] Sync error: {e}")
+            return 0
 
     def get_stats(self) -> dict:
         """Get overall portfolio statistics."""
