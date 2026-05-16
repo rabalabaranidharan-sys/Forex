@@ -1,9 +1,12 @@
 """
 ForexMind Auto Runner (UPGRADED)
+ENHANCEMENT 8: Cycle summary with position status
+
 Changes vs previous:
   + Day-end close at 20:00 UTC (avoids swap charges)
   + 15-min cooldown per pair after trade placed
   + 6 pairs: EUR, GBP, JPY, XAU, AUD, CAD
+  + Cycle summary: open positions, P&L, pips performance
 """
 
 import subprocess
@@ -30,7 +33,7 @@ last_close_hour = -1        # prevent double-close
 
 def banner():
     print("""
-╔══════════════════════════════════════════════════════════╗
+╔═══��══════════════════════════════════════════════════════╗
 ║        ForexMind SUPERBOT Auto Runner                    ║
 ║   Cycle: 15 min  |  Trade cooldown: 15 min per pair     ║
 ║   Day-end close: 20:00 UTC (avoids swap)                ║
@@ -38,6 +41,76 @@ def banner():
 ║   Press Ctrl+C to stop                                   ║
 ╚══════════════════════════════════════════════════════════╝
 """)
+
+
+# ── ENHANCEMENT 8: Cycle summary with position details ─────────────
+def get_pip_size(symbol: str) -> float:
+    """Get pip size for a given symbol."""
+    symbol_upper = symbol.upper().replace("_", "")
+    if "JPY" in symbol_upper:
+        return 0.01
+    if "XAU" in symbol_upper or "GOLD" in symbol_upper:
+        return 0.1
+    return 0.0001
+
+
+def print_cycle_summary(executor) -> dict:
+    """
+    ENHANCEMENT 8: Print performance summary for current cycle.
+    Returns summary dict with counts and totals.
+    """
+    if not MT5_AVAILABLE or not executor.connected:
+        return {"open": 0, "total_pnl": 0}
+    
+    try:
+        positions = mt5.positions_get()
+        if not positions:
+            print(f"  ══ Open Positions: 0 | Total P&L: $0.00 ══")
+            return {"open": 0, "total_pnl": 0}
+        
+        fm_positions = [p for p in positions if p.magic == MAGIC_NUMBER]
+        if not fm_positions:
+            print(f"  ══ Open Positions: 0 | Total P&L: $0.00 ══")
+            return {"open": 0, "total_pnl": 0}
+        
+        total_pnl = sum(p.profit for p in fm_positions)
+        
+        print(f"\n  ══ Cycle Summary ══")
+        print(f"  Open positions: {len(fm_positions)} | Total P&L: ${total_pnl:+.2f}")
+        
+        for pos in fm_positions:
+            symbol = pos.symbol
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                continue
+            
+            # Calculate pips
+            pip_size = get_pip_size(symbol)
+            if pos.type == 0:  # BUY
+                pips = (tick.bid - pos.price_open) / pip_size
+                direction = "BUY"
+            else:  # SELL
+                pips = (pos.price_open - tick.ask) / pip_size
+                direction = "SELL"
+            
+            # Format symbol for display
+            display_symbol = f"{symbol[:3]}/{symbol[3:]}" if len(symbol) == 6 else symbol
+            
+            # P&L sign
+            sign = "+" if pos.profit >= 0 else ""
+            
+            print(f"  {display_symbol}: {direction} #{pos.ticket} | {sign}${pos.profit:.2f} | {pips:+.1f} pips")
+        
+        print(f"  ═════════════════════════════════════")
+        
+        return {
+            "open": len(fm_positions),
+            "total_pnl": round(total_pnl, 2),
+        }
+    
+    except Exception as e:
+        print(f"  [AutoRunner] Summary error: {e}")
+        return {"open": 0, "total_pnl": 0}
 
 
 def close_all_positions_eod():
@@ -112,6 +185,10 @@ def main():
     cycle = 1
     global last_close_hour
 
+    # Initialize executor for summary function
+    from utils.mt5_executor import MT5Executor
+    executor = MT5Executor()
+
     while True:
         now_utc = datetime.now(timezone.utc)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -154,9 +231,15 @@ def main():
 
             time.sleep(5)
 
-        cycle += 1
+        # ── ENHANCEMENT 8: Print cycle summary ─────────────────────
+        print(f"\n{'='*58}")
+        summary = print_cycle_summary(executor)
+        next_cycle = cycle + 1
         next_run = datetime.fromtimestamp(time.time() + INTERVAL)
-        print(f"\n  💤 Cycle #{cycle-1} done. Next: {next_run.strftime('%H:%M:%S')}")
+        print(f"  Next cycle: {next_run.strftime('%H:%M:%S')}")
+        print(f"{'='*58}\n")
+
+        cycle += 1
 
         try:
             time.sleep(INTERVAL)
