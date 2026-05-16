@@ -1,11 +1,5 @@
 """
 ForexMind - Main Orchestrator with Session Filter (ENHANCED)
-Analyzes forex pairs and places trades on MT5 demo with dynamic position sizing.
-
-Usage:
-  python main.py                        -- runs all pairs
-  python main.py --pair EUR_USD         -- single pair
-  python main.py --pair EUR_USD --rounds 2
 """
 
 import argparse
@@ -54,7 +48,6 @@ def print_header():
     print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-
 def print_separator(title=""):
     print("")
     if title:
@@ -62,15 +55,31 @@ def print_separator(title=""):
     else:
         print("  " + "-" * 40)
 
+def get_open_positions_all(executor):
+    """Return all open positions (raw, for correlation check)."""
+    try:
+        return executor.get_open_positions() if hasattr(executor, 'get_open_positions') else []
+    except Exception:
+        return []
 
 async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
     """
     Full analysis pipeline for one currency pair.
-    Returns the final decision dict or None on failure.
+    Now auto-syncs outcomes from MT5 at the start of each run.
+    Passes ATR-based SL/TP to executor.
     """
     print_separator(f"Analyzing {pair}")
 
-    # -- ENHANCEMENT 1: Session Filter Check ----------------------------------
+    # -- NEW: Sync trade outcomes from MT5 at the start ----
+    if hasattr(memory, 'sync_outcomes_from_mt5'):
+        try:
+            updated = memory.sync_outcomes_from_mt5(executor)
+            if updated:
+                print(f"  [Main] {updated} outcomes synced from MT5 history.")
+        except Exception as e:
+            print(f"  [Main] Outcome sync error: {e}")
+
+    # -- Session Filter Check ----------------------------------------
     if SESSION_FILTER_AVAILABLE:
         ok, reason = should_trade(pair)
         if not ok:
@@ -79,7 +88,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
                 telegram.send(f"⏭️ Skipping {pair}: {reason}")
             return None
 
-    # -- ENHANCEMENT 3: Calendar/News Filter ----------------------------------
+    # -- Calendar/News Filter ----------------------------------------
     if CALENDAR_FILTER_AVAILABLE:
         safe, reason = check_calendar(pair, hours_ahead=1)
         if not safe:
@@ -88,7 +97,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
                 telegram.send(f"📰 News blackout {pair}: {reason}")
             return None
 
-    # -- Step 1: Check for existing open position -----------------------------
+    # -- Step 1: Check for existing open position --------------------
     existing = executor.get_open_positions(pair)
     if existing:
         print(f"  [Main] Position already open for {pair} -- skipping")
@@ -96,7 +105,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
             print(f"    Ticket #{pos['ticket']} | {pos['type']} | P&L: ${pos['profit']}")
         return None
 
-    # -- Step 2: Fetch market data --------------------------------------------
+    # -- Step 2: Fetch market data -----------------------------------
     print(f"  [Main] Fetching data for {pair}...")
     data = {}
     for tf in DEFAULT_TIMEFRAMES:
@@ -112,19 +121,19 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
         print(f"  [Main] ERROR: No data at all for {pair} -- skipping")
         return None
 
-    # -- Step 3: Calculate indicators -----------------------------------------
+    # -- Step 3: Calculate indicators -------------------------------
     print(f"  [Main] Calculating indicators...")
     indicators = {}
     current_indicators = None
     for tf, ohlcv in data.items():
         try:
             indicators[tf] = get_all_indicators(ohlcv)
-            if tf == DEFAULT_TIMEFRAMES[0]:  # Use first timeframe for market context
+            if tf == DEFAULT_TIMEFRAMES[0]:
                 current_indicators = indicators[tf]
         except Exception as e:
             print(f"    WARNING: Indicator error for {tf}: {e}")
 
-    # -- Step 4: Run 4 analysts in parallel -----------------------------------
+    # -- Step 4: Run 4 analysts in parallel --------------------------
     print(f"  [Main] Running 4 analysts for {pair}...")
     try:
         analysis = await run_analysts(pair, DEFAULT_TIMEFRAMES, llm)
@@ -136,7 +145,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
         print(f"  [Main] Analysts error: {e}")
         analysis = {}
 
-    # -- Step 5: Bull vs Bear debate with market context ----------------------
+    # -- Step 5: Bull vs Bear debate with market context -------------
     print(f"  [Main] Running Bull vs Bear debate ({rounds} rounds)...")
     try:
         debate_result = await run_debate(pair, analysis, rounds, llm, current_indicators)
@@ -147,17 +156,23 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
         print(f"  [Main] Debate error: {e}")
         debate_result = {"lean": "NEUTRAL", "confidence": 50, "transcript": []}
 
-    # -- Step 6: Load trade history for context ------
+    # -- Step 6: Load trade history for context ----------------------
     history = []
     try:
         history = memory.get_history(pair)[-5:]  # Last 5 trades
     except Exception as e:
         print(f"  [Main] History note: {e}")
 
-    # -- Step 7: Execution pipeline (Trader -> Risk Mgr -> Portfolio Mgr) -----
+    # -- Step 7: Execution pipeline with correlation and ATR pass ----
     print(f"  [Main] Running execution pipeline...")
     try:
-        decision = await run_execution_pipeline(pair, analysis, debate_result, history, llm, memory=memory)
+        # NEW: Get all open positions for correlation gate
+        open_positions_all = get_open_positions_all(executor)
+        decision = await run_execution_pipeline(
+            pair, analysis, debate_result, history, llm,
+            open_positions=open_positions_all,
+            memory=memory,
+        )
         print(f"    Action:     {decision.get('action', 'N/A')}")
         print(f"    Confidence: {decision.get('confidence', 'N/A')}%")
         print(f"    Position:   {decision.get('position_size', 'N/A')} lots")
@@ -165,11 +180,9 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
         print(f"  [Main] Execution error: {e}")
         decision = {"action": "HOLD", "confidence": 0, "position_size": 0}
 
-    # -- Step 8: Place order if BUY or SELL -----------------------------------
+    # -- Step 8: Place order if BUY or SELL; pass ATR for SL/TP -----
     action = decision.get("action", "HOLD").upper()
-
     if action in ("BUY", "SELL"):
-        # Double-check no position opened
         existing_now = executor.get_open_positions(pair)
         if existing_now:
             print(f"  [Main] Position already opened -- skipping")
@@ -179,8 +192,10 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
             # Calculate ATR-based SL/TP from current indicators
             atr_value = 0.0
             if current_indicators and current_indicators.get("atr"):
-                atr_value = float(current_indicators["atr"])
-
+                try:
+                    atr_value = float(current_indicators["atr"])
+                except Exception:
+                    atr_value = 0.0
             order_result = executor.place_order(
                 pair=pair,
                 action=action,
@@ -197,7 +212,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
     else:
         print(f"  [Main] Decision is HOLD -- no order placed")
 
-    # -- Step 9: Send Telegram alert ------------------------------------------
+    # -- Step 9: Send Telegram alert ----------------------------------
     try:
         telegram.send_signal(
             pair=pair,
@@ -206,7 +221,7 @@ async def analyze_pair(pair, rounds, llm, fetcher, executor, telegram, memory):
     except Exception as e:
         print(f"  [Main] Telegram warning: {e}")
 
-    # -- Step 10: Save to memory -----------------------------------------------
+    # -- Step 10: Save to memory --------------------------------------
     try:
         memory.save_decision(pair, decision, analysis, debate_result.get("transcript", []))
     except Exception as e:
@@ -226,7 +241,6 @@ async def main():
 
     print_header()
 
-    # -- Show session info if available
     if SESSION_FILTER_AVAILABLE:
         try:
             session_info = get_session_info()
@@ -291,7 +305,6 @@ async def main():
 
     print(f"\n  Run complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60 + "\n")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
