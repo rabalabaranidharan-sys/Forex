@@ -1,5 +1,6 @@
 """
-ForexMind — MT5 Demo Order Executor (FIXED for wider gold SL)
+ForexMind — MT5 Demo Order Executor (ATR-BASED SL/TP)
+ENHANCEMENT 1: Dynamic SL/TP based on ATR volatility
 """
 
 import time
@@ -82,29 +83,52 @@ class MT5Executor:
             sl = 0.0
             tp = 0.0
 
-        # ── Wider gold SL/TP ──────────────────────────────────────
+        # ── ENHANCEMENT 1: ATR-Based SL/TP ────────────────────────────
         is_gold = symbol.upper().startswith('XAU')
-        if is_gold:
-            sl_pips = 300
-            tp_pips = 600
+        
+        if atr > 0:
+            # Dynamic ATR-based: SL = 1.5x ATR, TP = 3.0x ATR
+            sl_dist = round(atr * 1.5, 5)
+            tp_dist = round(atr * 3.0, 5)
+            
+            if action == "BUY":
+                sl = round(price - sl_dist, digits)
+                tp = round(price + tp_dist, digits)
+            else:  # SELL
+                sl = round(price + sl_dist, digits)
+                tp = round(price - tp_dist, digits)
+            
+            print(f"  [MT5 Executor] ATR={atr:.5f} | SL_dist={sl_dist:.5f} | TP_dist={tp_dist:.5f}")
+        
+        elif is_gold:
+            # Gold without ATR: use wider fixed levels
+            if action == "BUY":
+                sl = round(price - 15.0, digits)
+                tp = round(price + 30.0, digits)
+            else:  # SELL
+                sl = round(price + 15.0, digits)
+                tp = round(price - 30.0, digits)
+        
         else:
+            # Other pairs without ATR: standard formula
             sl_pips = 50
             tp_pips = 100
-
-        if action == "BUY":
-            if sl == 0.0 or sl >= price:
-                sl = round(price - (sl_pips * point * 10), digits)
-            if tp == 0.0 or tp <= price:
-                tp = round(price + (tp_pips * point * 10), digits)
-        else:
-            if sl == 0.0 or sl <= price:
-                sl = round(price + (sl_pips * point * 10), digits)
-            if tp == 0.0 or tp >= price:
-                tp = round(price - (tp_pips * point * 10), digits)
+            
+            if action == "BUY":
+                if sl == 0.0 or sl >= price:
+                    sl = round(price - (sl_pips * point * 10), digits)
+                if tp == 0.0 or tp <= price:
+                    tp = round(price + (tp_pips * point * 10), digits)
+            else:
+                if sl == 0.0 or sl <= price:
+                    sl = round(price + (sl_pips * point * 10), digits)
+                if tp == 0.0 or tp >= price:
+                    tp = round(price - (tp_pips * point * 10), digits)
 
         sl = round(sl, digits)
         tp = round(tp, digits)
 
+        # ── ENHANCEMENT 1: Hard cap lot size at 0.02 (testing mode) ────
         size = min(max(float(size), 0.01), 0.02)
         size = round(size, 2)
 
