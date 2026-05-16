@@ -2,6 +2,8 @@
 ForexMind - Session-Aware Trading Filter
 Prevents trading during low-volume sessions.
 
+ENHANCEMENT 7: Pair-specific optimal session routing
+
 Sessions (UTC):
   Asian:   23:00-08:00  (low volume — skip EUR/GBP)
   London:  08:00-16:00  (high volume — trade all)
@@ -42,6 +44,18 @@ def get_session_info() -> dict:
     return result
 
 
+# ── ENHANCEMENT 7: Pair-specific optimal sessions ──────────────────
+BEST_SESSIONS = {
+    "EUR_USD": ["london", "overlap"],
+    "GBP_USD": ["london", "overlap"],
+    "USD_JPY": ["asian", "london", "overlap"],
+    "AUD_USD": ["asian", "london"],
+    "USD_CAD": ["newyork", "overlap"],
+    "USD_CHF": ["london", "overlap"],
+    "XAU_USD": ["london", "overlap", "newyork"],  # gold trades all active sessions
+    "NZD_USD": ["asian"],
+}
+
 # Pairs allowed during Asian session (naturally active)
 ASIAN_ALLOWED = {"USD_JPY", "AUD_USD", "NZD_USD", "USD_CAD"}
 
@@ -49,19 +63,28 @@ ASIAN_ALLOWED = {"USD_JPY", "AUD_USD", "NZD_USD", "USD_CAD"}
 def should_trade(pair: str) -> tuple:
     """
     Returns (bool, reason) — whether to trade this pair now.
+    
+    ENHANCEMENT 7: Check if current session is optimal for this pair
     """
     session = get_current_session()
     info    = get_session_info()
+    pair_upper = pair.upper().replace("/", "_")
 
     if session == "closed":
         return False, f"[Session] Market closed (21:00-23:00 UTC) — skipping {pair}"
 
+    # ── ENHANCEMENT 7: Check pair-specific optimal sessions ──────────
+    if pair_upper in BEST_SESSIONS:
+        optimal_sessions = BEST_SESSIONS[pair_upper]
+        if session not in optimal_sessions:
+            return False, f"[Session] {pair} not optimal in {session} — waiting for {optimal_sessions}"
+
+    # ── Original logic: Asian session filtering ─────────────────────
     if session == "asian":
-        pair_key = pair.upper().replace("/", "_")
-        if pair_key in ASIAN_ALLOWED:
+        if pair_upper in ASIAN_ALLOWED:
             return True, f"[Session] Asian session — {pair} is JPY/AUD active pair ✓"
         else:
             return False, f"[Session] Asian session low volume — skipping {pair}"
 
-    # London, NY, Overlap — trade everything
+    # London, NY, Overlap — trade everything (unless filtered by BEST_SESSIONS above)
     return True, f"[Session] {info['session_name']} ({info['volume']}) — {pair} ✓"
